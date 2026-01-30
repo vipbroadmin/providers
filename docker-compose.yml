@@ -1,0 +1,46 @@
+services:
+  slotegrator-db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: slotegrator_db
+      POSTGRES_USER: slotegrator_user
+      POSTGRES_PASSWORD: slotegrator_pass
+    ports:
+      - "5436:5432"
+    volumes:
+      - slotegrator-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U slotegrator_user -d slotegrator_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - wallet-service
+
+  app:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      SLOTEGRATOR_HTTP_PORT: ${SLOTEGRATOR_HTTP_PORT:-8092}
+      SLOTEGRATOR_API_URL: ${SLOTEGRATOR_API_URL}
+      SLOTEGRATOR_SYNC_INTERVAL: ${SLOTEGRATOR_SYNC_INTERVAL:-5m}
+      MIGRATIONS_DIR: ${MIGRATIONS_DIR:-migrations}
+      DATABASE_URL: ${DATABASE_URL:-postgres://slotegrator_user:slotegrator_pass@slotegrator-db:5432/slotegrator_db?sslmode=disable}
+      WALLETS_SERVICE_URL: ${WALLETS_SERVICE_URL:-http://wallets-service:8081}
+    ports:
+      - "${SLOTEGRATOR_HTTP_PORT:-8092}:${SLOTEGRATOR_HTTP_PORT:-8092}"
+    depends_on:
+      slotegrator-db:
+        condition: service_healthy
+    networks:
+      - wallet-service
+
+volumes:
+  slotegrator-db-data:
+
+networks:
+  wallet-service:
+    external: true
+    name: wallet-service

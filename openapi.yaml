@@ -1,0 +1,354 @@
+openapi: 3.0.3
+info:
+  title: Slotegrator Service
+  version: 1.0.0
+  description: |
+    Slotegrator integration service for callback handling, game catalog,
+    and game launch sessions.
+servers:
+  - url: http://localhost:8092
+
+paths:
+  /slotegrator/callback:
+    post:
+      summary: Handle Slotegrator callback
+      description: |
+        Accepts Slotegrator callback actions: balance, bet, win, refund, rollback.
+        The service always responds with HTTP 200 and a JSON body.
+      parameters:
+        - in: header
+          name: X-Merchant-Id
+          required: true
+          schema:
+            type: string
+        - in: header
+          name: X-Timestamp
+          required: true
+          schema:
+            type: string
+        - in: header
+          name: X-Nonce
+          required: true
+          schema:
+            type: string
+        - in: header
+          name: X-Sign
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/CallbackBalanceRequest'
+                - $ref: '#/components/schemas/CallbackActionRequest'
+      responses:
+        '200':
+          description: Success or error (always HTTP 200)
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/CallbackSuccess'
+                  - $ref: '#/components/schemas/CallbackError'
+              examples:
+                success:
+                  summary: Success
+                  value:
+                    balance: "27.18"
+                    transaction_id: "abcd12345"
+                error:
+                  summary: Error
+                  value:
+                    error_code: "INTERNAL_ERROR"
+                    error_description: "wallets error"
+
+  /slotegrator/providers:
+    get:
+      summary: List providers
+      parameters:
+        - in: query
+          name: status
+          schema:
+            type: string
+        - in: query
+          name: search
+          schema:
+            type: string
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+        - in: query
+          name: offset
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        '200':
+          description: Providers list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Provider'
+        '500':
+          description: Server error
+
+  /slotegrator/games:
+    get:
+      summary: List games
+      parameters:
+        - in: query
+          name: provider_id
+          schema:
+            type: integer
+            minimum: 1
+        - in: query
+          name: status
+          schema:
+            type: string
+        - in: query
+          name: search
+          schema:
+            type: string
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+        - in: query
+          name: offset
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        '200':
+          description: Games list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Game'
+        '500':
+          description: Server error
+
+  /slotegrator/launch:
+    post:
+      summary: Launch a game session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LaunchRequest'
+      responses:
+        '200':
+          description: Launch success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LaunchResponse'
+        '400':
+          description: Bad request
+        '404':
+          description: Game not found
+
+components:
+  schemas:
+    CallbackBalanceRequest:
+      type: object
+      required:
+        - action
+        - player_id
+        - currency
+      properties:
+        action:
+          type: string
+          enum: [balance]
+        player_id:
+          type: string
+        currency:
+          type: string
+        session_id:
+          type: string
+        game_uuid:
+          type: string
+        transaction_id:
+          type: string
+    CallbackActionRequest:
+      type: object
+      required:
+        - action
+        - player_id
+        - currency
+        - transaction_id
+        - amount
+      properties:
+        action:
+          type: string
+          enum: [bet, win, refund, rollback]
+        player_id:
+          type: string
+        currency:
+          type: string
+        amount:
+          type: string
+          description: Decimal string amount
+        transaction_id:
+          type: string
+        session_id:
+          type: string
+        round_id:
+          type: string
+        type:
+          type: string
+        game_uuid:
+          type: string
+    CallbackSuccess:
+      type: object
+      properties:
+        balance:
+          type: string
+          description: Decimal string
+        transaction_id:
+          type: string
+    CallbackError:
+      type: object
+      properties:
+        error_code:
+          type: string
+          enum: [INSUFFICIENT_FUNDS, INTERNAL_ERROR]
+        error_description:
+          type: string
+    Provider:
+      type: object
+      properties:
+        ID:
+          type: integer
+        Name:
+          type: string
+        Label:
+          type: string
+          nullable: true
+        Status:
+          type: string
+        Source:
+          type: string
+        CreatedAt:
+          type: string
+          format: date-time
+        UpdatedAt:
+          type: string
+          format: date-time
+    Game:
+      type: object
+      properties:
+        UUID:
+          type: string
+        ProviderID:
+          type: integer
+        Name:
+          type: string
+        Type:
+          type: string
+          nullable: true
+        ProviderName:
+          type: string
+          nullable: true
+        Technology:
+          type: string
+          nullable: true
+        HasLobby:
+          type: boolean
+        IsMobile:
+          type: boolean
+        HasFreespins:
+          type: boolean
+        HasTables:
+          type: boolean
+        Label:
+          type: string
+          nullable: true
+        Image:
+          type: string
+          nullable: true
+        RTP:
+          type: number
+          nullable: true
+        Volatility:
+          type: string
+          nullable: true
+        Tags:
+          type: object
+          nullable: true
+          additionalProperties: true
+        Parameters:
+          type: object
+          nullable: true
+          additionalProperties: true
+        Images:
+          type: object
+          nullable: true
+          additionalProperties: true
+        RelatedGames:
+          type: object
+          nullable: true
+          additionalProperties: true
+        Status:
+          type: string
+        CreatedAt:
+          type: string
+          format: date-time
+        UpdatedAt:
+          type: string
+          format: date-time
+    LaunchRequest:
+      type: object
+      required:
+        - game_uuid
+        - player_id
+        - player_name
+        - currency
+      properties:
+        game_uuid:
+          type: string
+        player_id:
+          type: string
+        player_name:
+          type: string
+        currency:
+          type: string
+        session_id:
+          type: string
+        device:
+          type: string
+          enum: [desktop, mobile]
+        return_url:
+          type: string
+        language:
+          type: string
+        email:
+          type: string
+        lobby_data:
+          type: string
+        demo:
+          type: boolean
+    LaunchResponse:
+      type: object
+      properties:
+        session_id:
+          type: string
+        url:
+          type: string
