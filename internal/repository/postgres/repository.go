@@ -513,9 +513,9 @@ func (r *Repository) StartSync(ctx context.Context, key, cursor string) (SyncSta
 		}
 
 		if _, err := txRepo.exec(ctx, `
-			INSERT INTO sync_runs (key, run_id, status, started_at, last_cursor)
-			VALUES ($1, $2, 'running', $3, $4)
-		`, key, newRunID, now, nullString(cursor)); err != nil {
+			INSERT INTO sync_runs (key, sync_type, run_id, status, started_at, last_cursor)
+			VALUES ($1, $2, $3, 'running', $4, $5)
+		`, key, key, newRunID, now, nullString(cursor)); err != nil {
 			return err
 		}
 
@@ -528,7 +528,7 @@ func (r *Repository) StartSync(ctx context.Context, key, cursor string) (SyncSta
 	return result, err
 }
 
-func (r *Repository) FinishSync(ctx context.Context, key, runID string, success bool, errMsg string) error {
+func (r *Repository) FinishSync(ctx context.Context, key, runID string, success bool, errMsg string, itemsCount *int) error {
 	status := "success"
 	if !success {
 		status = "failed"
@@ -556,9 +556,10 @@ func (r *Repository) FinishSync(ctx context.Context, key, runID string, success 
 		UPDATE sync_runs
 		SET status = $1,
 		    finished_at = now(),
-		    error = $2
-		WHERE run_id = $3
-	`, status, nullString(errValue), runID); err != nil {
+		    error = $2,
+		    items_count = $3
+		WHERE run_id = $4
+	`, status, nullString(errValue), nullInt(itemsCount), runID); err != nil {
 		return err
 	}
 	return nil
@@ -624,7 +625,7 @@ func (r *Repository) ListRecentSyncStatus(ctx context.Context, key string, windo
 func (r *Repository) ListSyncRuns(ctx context.Context, key string, limit, offset int) ([]domain.SyncRun, error) {
 	limit, offset = normalizePaging(limit, offset)
 	const query = `
-		SELECT id, key, run_id, status, started_at, finished_at, last_cursor, error
+		SELECT id, key, run_id, status, started_at, finished_at, last_cursor, error, sync_type, items_count
 		FROM sync_runs
 		WHERE key = $1
 		ORDER BY started_at DESC
@@ -642,6 +643,8 @@ func (r *Repository) ListSyncRuns(ctx context.Context, key string, limit, offset
 		var finishedAt *time.Time
 		var lastCursor *string
 		var errValue *string
+		var itemsCount *int
+		var syncType string
 		if err := rows.Scan(
 			&item.ID,
 			&item.Key,
@@ -651,6 +654,8 @@ func (r *Repository) ListSyncRuns(ctx context.Context, key string, limit, offset
 			&finishedAt,
 			&lastCursor,
 			&errValue,
+			&syncType,
+			&itemsCount,
 		); err != nil {
 			return nil, err
 		}
@@ -661,6 +666,8 @@ func (r *Repository) ListSyncRuns(ctx context.Context, key string, limit, offset
 		if errValue != nil {
 			item.Error = *errValue
 		}
+		item.SyncType = syncType
+		item.ItemsCount = itemsCount
 		items = append(items, item)
 	}
 	if rows.Err() != nil {
@@ -731,6 +738,13 @@ func nullBytes(value []byte) any {
 		return nil
 	}
 	return value
+}
+
+func nullInt(value *int) any {
+	if value == nil {
+		return nil
+	}
+	return *value
 }
 
 func derefTime(value *time.Time) time.Time {

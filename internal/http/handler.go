@@ -563,8 +563,13 @@ func formatProviderCursor(ids []int) string {
 func (h *Handler) runProvidersSync(runID string) {
 	ctx := context.Background()
 	syncer := catalogsync.NewCatalogSync(h.repo, h.api, 0)
-	_, err := syncer.SyncProviders(ctx)
-	if finishErr := h.repo.FinishSync(ctx, "providers", runID, err == nil, errString(err)); finishErr != nil {
+	result, err := syncer.SyncProviders(ctx)
+	var itemsCount *int
+	if err == nil {
+		count := result.Items
+		itemsCount = &count
+	}
+	if finishErr := h.repo.FinishSync(ctx, "providers", runID, err == nil, errString(err), itemsCount); finishErr != nil {
 		log.Printf("providers sync finish error: %v", finishErr)
 	}
 	if err != nil {
@@ -575,8 +580,13 @@ func (h *Handler) runProvidersSync(runID string) {
 func (h *Handler) runGamesSync(runID string, providerIDs []int) {
 	ctx := context.Background()
 	syncer := catalogsync.NewCatalogSync(h.repo, h.api, 0)
-	_, err := syncer.SyncGames(ctx, providerIDs)
-	if finishErr := h.repo.FinishSync(ctx, "games", runID, err == nil, errString(err)); finishErr != nil {
+	result, err := syncer.SyncGames(ctx, providerIDs)
+	var itemsCount *int
+	if err == nil {
+		count := result.Items
+		itemsCount = &count
+	}
+	if finishErr := h.repo.FinishSync(ctx, "games", runID, err == nil, errString(err), itemsCount); finishErr != nil {
 		log.Printf("games sync finish error: %v", finishErr)
 	}
 	if err != nil {
