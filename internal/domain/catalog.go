@@ -79,12 +79,14 @@ type SyncStatusItem struct {
 }
 
 type SyncRun struct {
-	ID         int64
-	Key        string
-	RunID      string
-	Status     string
-	StartedAt  time.Time
-	FinishedAt *time.Time
-	LastCursor string
-	Error      string
+	ID         int64      `json:"id"`
+	Key        string     `json:"key"`
+	RunID      string     `json:"run_id"`
+	Status     string     `json:"status"`
+	StartedAt  time.Time  `json:"started_at"`
+	FinishedAt *time.Time `json:"finished_at,omitempty"`
+	LastCursor string     `json:"last_cursor,omitempty"`
+	Error      string     `json:"error,omitempty"`
+	SyncType   string     `json:"sync_type"`
+	ItemsCount *int       `json:"count,omitempty"`
 }

@@ -22,12 +22,14 @@ type CatalogSync struct {
 type ProvidersSyncResult struct {
 	Providers int
 	SyncedAt  time.Time
+	Items     int
 }
 
 type GamesSyncResult struct {
 	Providers int
 	Games     int
 	SyncedAt  time.Time
+	Items     int
 }
 
 func NewCatalogSync(repo *postgres.Repository, api *slotegratorapi.Client, interval time.Duration) *CatalogSync {
@@ -72,6 +74,7 @@ func (s *CatalogSync) SyncProviders(ctx context.Context) (ProvidersSyncResult, e
 	return ProvidersSyncResult{
 		Providers: len(providers),
 		SyncedAt:  syncedAt,
+		Items:     len(games),
 	}, nil
 }
 
@@ -153,6 +156,7 @@ func (s *CatalogSync) SyncGames(ctx context.Context, providerIDs []int) (GamesSy
 		Providers: len(providers),
 		Games:     len(domainGames),
 		SyncedAt:  syncedAt,
+		Items:     len(games),
 	}, nil
 }
 
