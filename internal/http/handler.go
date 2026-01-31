@@ -1,7 +1,6 @@
 package httpdelivery
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -336,18 +335,6 @@ type syncStartResponse struct {
 	StartedAt *time.Time `json:"started_at,omitempty"`
 }
 
-type syncErrorDetails struct {
-	Message string              `json:"message"`
-	Headers map[string][]string `json:"headers"`
-	Query   map[string][]string `json:"query"`
-	Body    any                 `json:"body"`
-}
-
-type syncErrorResponse struct {
-	Error   string           `json:"error"`
-	Details syncErrorDetails `json:"details"`
-}
-
 func (h *Handler) syncProviders(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -356,7 +343,7 @@ func (h *Handler) syncProviders(w http.ResponseWriter, r *http.Request) {
 	start, err := h.repo.StartSync(r.Context(), "providers", "")
 	if err != nil {
 		log.Printf("providers sync start error: %v", err)
-		writeSyncError(w, http.StatusInternalServerError, "sync start failed", err, r, map[string]any{})
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "sync start failed"})
 		return
 	}
 	startedAt := optionalTime(start.StartedAt)
@@ -378,22 +365,20 @@ func (h *Handler) syncGames(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req gamesSyncRequest
-	rawBody, err := readJSONBody(r, &req)
-	if err != nil {
-		body := formatRawBody(rawBody)
-		writeSyncError(w, http.StatusBadRequest, "invalid request", err, r, body)
+	if err := decodeOptionalJSON(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
 		return
 	}
 	providerIDs, err := normalizeProviderIDs(req.ProviderIDs)
 	if err != nil {
-		writeSyncError(w, http.StatusBadRequest, "invalid provider_ids", err, r, req)
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid provider_ids"})
 		return
 	}
 	cursor := formatProviderCursor(providerIDs)
 	start, err := h.repo.StartSync(r.Context(), "games", cursor)
 	if err != nil {
 		log.Printf("games sync start error: %v", err)
-		writeSyncError(w, http.StatusInternalServerError, "sync start failed", err, r, req)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "sync start failed"})
 		return
 	}
 	startedAt := optionalTime(start.StartedAt)
@@ -501,27 +486,23 @@ func decodeJSON(r *http.Request, out any) error {
 	return nil
 }
 
-func readJSONBody(r *http.Request, out any) ([]byte, error) {
+func decodeOptionalJSON(r *http.Request, out any) error {
 	if r.Body == nil {
-		return nil, nil
+		return nil
 	}
 	defer r.Body.Close()
-	raw, err := io.ReadAll(r.Body)
-	if err != nil {
-		return raw, err
-	}
-	if len(bytes.TrimSpace(raw)) == 0 {
-		return raw, nil
-	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(out); err != nil {
-		return raw, err
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		return err
 	}
 	if decoder.More() {
-		return raw, errors.New("invalid json")
+		return errors.New("invalid json")
 	}
-	return raw, nil
+	return nil
 }
 
 func parseInt(raw string) int {
@@ -625,37 +606,6 @@ func optionalTime(value time.Time) *time.Time {
 		return nil
 	}
 	return &value
-}
-
-func writeSyncError(w http.ResponseWriter, status int, message string, err error, r *http.Request, body any) {
-	writeJSON(w, status, syncErrorResponse{
-		Error: message,
-		Details: syncErrorDetails{
-			Message: errString(err),
-			Headers: sanitizeHeaders(r.Header),
-			Query:   r.URL.Query(),
-			Body:    body,
-		},
-	})
-}
-
-func sanitizeHeaders(headers http.Header) map[string][]string {
-	out := make(map[string][]string, len(headers))
-	for key, values := range headers {
-		if strings.EqualFold(key, "Authorization") {
-			out[key] = []string{"REDACTED"}
-			continue
-		}
-		out[key] = values
-	}
-	return out
-}
-
-func formatRawBody(raw []byte) map[string]any {
-	if len(bytes.TrimSpace(raw)) == 0 {
-		return map[string]any{}
-	}
-	return map[string]any{"raw": string(raw)}
 }
 
  
