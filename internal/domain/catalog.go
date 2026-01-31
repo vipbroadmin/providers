@@ -58,7 +58,33 @@ type GameSession struct {
 }
 
 type SyncState struct {
+	Key              string
+	Status           string
+	CurrentRunID      string
+	CurrentStartedAt *time.Time
+	LastSyncAt       *time.Time
+	LastSuccessAt    *time.Time
+	LastCursor       string
+	LastError        string
+}
+
+type SyncStatusItem struct {
+	Key              string
+	Status           string
+	CurrentRunID      string
+	CurrentStartedAt *time.Time
+	LastSuccessAt    *time.Time
+	LastCursor       string
+	LastError        string
+}
+
+type SyncRun struct {
+	ID         int64
 	Key        string
-	LastSyncAt *time.Time
+	RunID      string
+	Status     string
+	StartedAt  time.Time
+	FinishedAt *time.Time
 	LastCursor string
+	Error      string
 }

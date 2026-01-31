@@ -6,7 +6,6 @@ import (
 	"log"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 
 	"slotegrator-service/internal/domain"
@@ -65,7 +64,7 @@ func (s *CatalogSync) SyncProviders(ctx context.Context) (ProvidersSyncResult, e
 		if err := txRepo.UpsertProviders(ctx, providers); err != nil {
 			return err
 		}
-		return txRepo.UpsertSyncState(ctx, "providers", syncedAt, "")
+		return nil
 	}); err != nil {
 		return ProvidersSyncResult{}, err
 	}
@@ -138,7 +137,6 @@ func (s *CatalogSync) SyncGames(ctx context.Context, providerIDs []int) (GamesSy
 	})
 
 	syncedAt := time.Now().UTC()
-	lastCursor := formatProviderCursor(providerIDs)
 	if err := s.repo.WithTx(ctx, func(ctx context.Context, txRepo *postgres.Repository) error {
 		if err := txRepo.UpsertProviders(ctx, providers); err != nil {
 			return err
@@ -146,7 +144,7 @@ func (s *CatalogSync) SyncGames(ctx context.Context, providerIDs []int) (GamesSy
 		if err := txRepo.UpsertGames(ctx, domainGames); err != nil {
 			return err
 		}
-		return txRepo.UpsertSyncState(ctx, "games", syncedAt, lastCursor)
+		return nil
 	}); err != nil {
 		return GamesSyncResult{}, err
 	}
@@ -190,26 +188,6 @@ func collectProviders(games []slotegratorapi.GameItem) []domain.Provider {
 		return providers[i].ID < providers[j].ID
 	})
 	return providers
-}
-
-func formatProviderCursor(providerIDs []int) string {
-	if len(providerIDs) == 0 {
-		return ""
-	}
-	unique := make(map[int]struct{}, len(providerIDs))
-	for _, id := range providerIDs {
-		unique[id] = struct{}{}
-	}
-	sorted := make([]int, 0, len(unique))
-	for id := range unique {
-		sorted = append(sorted, id)
-	}
-	sort.Ints(sorted)
-	parts := make([]string, 0, len(sorted))
-	for _, id := range sorted {
-		parts = append(parts, strconv.Itoa(id))
-	}
-	return strings.Join(parts, ",")
 }
 
 func parseParameters(raw json.RawMessage) (*float64, string) {

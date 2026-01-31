@@ -1,6 +1,7 @@
 package httpdelivery
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -9,7 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"slotegrator-service/internal/auth"
@@ -28,8 +29,6 @@ type Handler struct {
 	wallets *wallets.Client
 	repo    *postgres.Repository
 	api     *slotegratorapi.Client
-	syncMu  sync.Mutex
-	syncing bool
 }
 
 func New(cfg config.Config, walletsClient *wallets.Client, repo *postgres.Repository, api *slotegratorapi.Client) *Handler {
@@ -45,8 +44,10 @@ func (h *Handler) Router() http.Handler {
 	r := chi.NewRouter()
 	r.Post("/slotegrator/callback", h.callback)
 	r.Get("/slotegrator/providers", h.listProviders)
+	r.Get("/slotegrator/providers/sync/status", h.providersSyncStatus)
 	r.Post("/slotegrator/providers/sync", h.syncProviders)
 	r.Get("/slotegrator/games", h.listGames)
+	r.Get("/slotegrator/games/sync/status", h.gamesSyncStatus)
 	r.Post("/slotegrator/games/sync", h.syncGames)
 	r.Post("/slotegrator/launch", h.launch)
 	return r
@@ -328,28 +329,34 @@ type gamesSyncRequest struct {
 	ProviderIDs []int `json:"provider_ids"`
 }
 
+type syncStartResponse struct {
+	RunID     string     `json:"run_id"`
+	Status    string     `json:"status"`
+	StartedAt *time.Time `json:"started_at,omitempty"`
+}
+
 func (h *Handler) syncProviders(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
-	if !h.startSync() {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "sync already in progress"})
-		return
-	}
-	defer h.finishSync()
-
-	syncer := catalogsync.NewCatalogSync(h.repo, h.api, 0)
-	result, err := syncer.SyncProviders(r.Context())
+	start, err := h.repo.StartSync(r.Context(), "providers", "")
 	if err != nil {
-		log.Printf("providers sync error: %v", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "sync failed"})
+		log.Printf("providers sync start error: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "sync start failed"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"providers": result.Providers,
-		"synced_at": result.SyncedAt,
+	startedAt := optionalTime(start.StartedAt)
+	writeJSON(w, http.StatusAccepted, syncStartResponse{
+		RunID:     start.RunID,
+		Status:    "running",
+		StartedAt: startedAt,
 	})
+	if start.AlreadyRunning {
+		return
+	}
+
+	go h.runProvidersSync(start.RunID)
 }
 
 func (h *Handler) syncGames(w http.ResponseWriter, r *http.Request) {
@@ -367,23 +374,67 @@ func (h *Handler) syncGames(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid provider_ids"})
 		return
 	}
-	if !h.startSync() {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "sync already in progress"})
+	cursor := formatProviderCursor(providerIDs)
+	start, err := h.repo.StartSync(r.Context(), "games", cursor)
+	if err != nil {
+		log.Printf("games sync start error: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "sync start failed"})
 		return
 	}
-	defer h.finishSync()
+	startedAt := optionalTime(start.StartedAt)
+	writeJSON(w, http.StatusAccepted, syncStartResponse{
+		RunID:     start.RunID,
+		Status:    "running",
+		StartedAt: startedAt,
+	})
+	if start.AlreadyRunning {
+		return
+	}
 
-	syncer := catalogsync.NewCatalogSync(h.repo, h.api, 0)
-	result, err := syncer.SyncGames(r.Context(), providerIDs)
+	go h.runGamesSync(start.RunID, providerIDs)
+}
+
+func (h *Handler) providersSyncStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	limitRaw := parseInt(r.URL.Query().Get("limit"))
+	offsetRaw := parseInt(r.URL.Query().Get("offset"))
+	limit := normalizeLimit(limitRaw)
+	offset := normalizeOffset(offsetRaw)
+	items, err := h.repo.ListSyncRuns(r.Context(), "providers", limit, offset)
 	if err != nil {
-		log.Printf("games sync error: %v", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "sync failed"})
+		log.Printf("providers sync status error: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load sync status"})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"providers": result.Providers,
-		"games":     result.Games,
-		"synced_at": result.SyncedAt,
+		"items":  items,
+		"limit":  limit,
+		"offset": offset,
+	})
+}
+
+func (h *Handler) gamesSyncStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	limitRaw := parseInt(r.URL.Query().Get("limit"))
+	offsetRaw := parseInt(r.URL.Query().Get("offset"))
+	limit := normalizeLimit(limitRaw)
+	offset := normalizeOffset(offsetRaw)
+	items, err := h.repo.ListSyncRuns(r.Context(), "games", limit, offset)
+	if err != nil {
+		log.Printf("games sync status error: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load sync status"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":  items,
+		"limit":  limit,
+		"offset": offset,
 	})
 }
 
@@ -465,6 +516,20 @@ func parseInt(raw string) int {
 	return val
 }
 
+func normalizeLimit(limit int) int {
+	if limit <= 0 || limit > 500 {
+		return 100
+	}
+	return limit
+}
+
+func normalizeOffset(offset int) int {
+	if offset < 0 {
+		return 0
+	}
+	return offset
+}
+
 func normalizeProviderIDs(ids []int) ([]int, error) {
 	if len(ids) == 0 {
 		return nil, nil
@@ -484,20 +549,53 @@ func normalizeProviderIDs(ids []int) ([]int, error) {
 	return normalized, nil
 }
 
-func (h *Handler) startSync() bool {
-	h.syncMu.Lock()
-	defer h.syncMu.Unlock()
-	if h.syncing {
-		return false
+func formatProviderCursor(ids []int) string {
+	if len(ids) == 0 {
+		return ""
 	}
-	h.syncing = true
-	return true
+	parts := make([]string, 0, len(ids))
+	for _, id := range ids {
+		parts = append(parts, strconv.Itoa(id))
+	}
+	return strings.Join(parts, ",")
 }
 
-func (h *Handler) finishSync() {
-	h.syncMu.Lock()
-	h.syncing = false
-	h.syncMu.Unlock()
+func (h *Handler) runProvidersSync(runID string) {
+	ctx := context.Background()
+	syncer := catalogsync.NewCatalogSync(h.repo, h.api, 0)
+	_, err := syncer.SyncProviders(ctx)
+	if finishErr := h.repo.FinishSync(ctx, "providers", runID, err == nil, errString(err)); finishErr != nil {
+		log.Printf("providers sync finish error: %v", finishErr)
+	}
+	if err != nil {
+		log.Printf("providers sync error: %v", err)
+	}
+}
+
+func (h *Handler) runGamesSync(runID string, providerIDs []int) {
+	ctx := context.Background()
+	syncer := catalogsync.NewCatalogSync(h.repo, h.api, 0)
+	_, err := syncer.SyncGames(ctx, providerIDs)
+	if finishErr := h.repo.FinishSync(ctx, "games", runID, err == nil, errString(err)); finishErr != nil {
+		log.Printf("games sync finish error: %v", finishErr)
+	}
+	if err != nil {
+		log.Printf("games sync error: %v", err)
+	}
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+func optionalTime(value time.Time) *time.Time {
+	if value.IsZero() {
+		return nil
+	}
+	return &value
 }
 
  

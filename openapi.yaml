@@ -6,7 +6,7 @@ info:
     Slotegrator integration service for callback handling, game catalog,
     and game launch sessions.
     Catalog data is stored locally and refreshed via POST /slotegrator/providers/sync
-    and POST /slotegrator/games/sync.
+    and POST /slotegrator/games/sync. Sync runs asynchronously and returns a run_id.
 servers:
   - url: http://localhost:8092
 
@@ -110,16 +110,40 @@ paths:
       description: |
         Triggers a one-time providers sync from Slotegrator and updates the local store.
       responses:
-        '200':
-          description: Sync completed
+        '202':
+          description: Sync accepted
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ProvidersSyncResponse'
-        '409':
-          description: Sync already in progress
+                $ref: '#/components/schemas/SyncStartResponse'
         '500':
-          description: Sync failed
+          description: Sync start failed
+
+  /slotegrator/providers/sync/status:
+    get:
+      summary: List providers sync status
+      description: |
+        Returns sync run history with pagination.
+      parameters:
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+        - in: query
+          name: offset
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        '200':
+          description: Sync status list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncRunsListResponse'
+        '500':
+          description: Failed to load sync status
 
   /slotegrator/games:
     get:
@@ -176,16 +200,40 @@ paths:
             schema:
               $ref: '#/components/schemas/GamesSyncRequest'
       responses:
-        '200':
-          description: Sync completed
+        '202':
+          description: Sync accepted
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/GamesSyncResponse'
-        '409':
-          description: Sync already in progress
+                $ref: '#/components/schemas/SyncStartResponse'
         '500':
-          description: Sync failed
+          description: Sync start failed
+
+  /slotegrator/games/sync/status:
+    get:
+      summary: List games sync status
+      description: |
+        Returns sync run history with pagination.
+      parameters:
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+        - in: query
+          name: offset
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        '200':
+          description: Sync status list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncRunsListResponse'
+        '500':
+          description: Failed to load sync status
 
   /slotegrator/launch:
     post:
@@ -403,21 +451,49 @@ components:
           items:
             type: integer
             minimum: 1
-    ProvidersSyncResponse:
+    SyncStartResponse:
       type: object
       properties:
-        providers:
-          type: integer
-        synced_at:
+        run_id:
+          type: string
+        status:
+          type: string
+          enum: [running]
+        started_at:
           type: string
           format: date-time
-    GamesSyncResponse:
+    SyncRunItem:
       type: object
       properties:
-        providers:
+        id:
           type: integer
-        games:
-          type: integer
-        synced_at:
+        key:
+          type: string
+        run_id:
+          type: string
+        status:
+          type: string
+        started_at:
           type: string
           format: date-time
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+        last_cursor:
+          type: string
+          nullable: true
+        error:
+          type: string
+          nullable: true
+    SyncRunsListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/SyncRunItem'
+        limit:
+          type: integer
+        offset:
+          type: integer

@@ -7,6 +7,7 @@ import (
 
 	"slotegrator-service/internal/domain"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -61,6 +62,12 @@ type GameFilter struct {
 	Search     string
 	Limit      int
 	Offset     int
+}
+
+type SyncStartResult struct {
+	RunID          string
+	StartedAt      time.Time
+	AlreadyRunning bool
 }
 
 func (r *Repository) UpsertProviders(ctx context.Context, providers []domain.Provider) error {
@@ -445,14 +452,221 @@ func (r *Repository) TouchSessionFromCallback(ctx context.Context, sessionID, pl
 
 func (r *Repository) UpsertSyncState(ctx context.Context, key string, lastSyncAt time.Time, lastCursor string) error {
 	const query = `
-		INSERT INTO sync_state (key, last_sync_at, last_cursor)
-		VALUES ($1,$2,$3)
+		INSERT INTO sync_state (key, last_sync_at, last_cursor, status, last_success_at)
+		VALUES ($1,$2,$3,'success',$2)
 		ON CONFLICT (key) DO UPDATE SET
 			last_sync_at = EXCLUDED.last_sync_at,
-			last_cursor = EXCLUDED.last_cursor
+			last_cursor = EXCLUDED.last_cursor,
+			status = 'success',
+			last_success_at = EXCLUDED.last_success_at,
+			last_error = NULL
 	`
 	_, err := r.exec(ctx, query, key, lastSyncAt, nullString(lastCursor))
 	return err
+}
+
+func (r *Repository) StartSync(ctx context.Context, key, cursor string) (SyncStartResult, error) {
+	var result SyncStartResult
+	err := r.WithTx(ctx, func(ctx context.Context, txRepo *Repository) error {
+		if _, err := txRepo.exec(ctx, `
+			INSERT INTO sync_state (key, status)
+			VALUES ($1, 'idle')
+			ON CONFLICT (key) DO NOTHING
+		`, key); err != nil {
+			return err
+		}
+
+		var status string
+		var runID *string
+		var startedAt *time.Time
+		row := txRepo.queryRow(ctx, `
+			SELECT status, current_run_id, current_started_at
+			FROM sync_state
+			WHERE key = $1
+			FOR UPDATE
+		`, key)
+		if err := row.Scan(&status, &runID, &startedAt); err != nil {
+			return err
+		}
+
+		if status == "running" && runID != nil && *runID != "" {
+			result = SyncStartResult{
+				RunID:          *runID,
+				StartedAt:      derefTime(startedAt),
+				AlreadyRunning: true,
+			}
+			return nil
+		}
+
+		newRunID := uuid.NewString()
+		now := time.Now().UTC()
+		if _, err := txRepo.exec(ctx, `
+			UPDATE sync_state
+			SET status = 'running',
+				current_run_id = $2,
+				current_started_at = $3,
+				last_cursor = $4,
+				last_error = NULL
+			WHERE key = $1
+		`, key, newRunID, now, nullString(cursor)); err != nil {
+			return err
+		}
+
+		if _, err := txRepo.exec(ctx, `
+			INSERT INTO sync_runs (key, run_id, status, started_at, last_cursor)
+			VALUES ($1, $2, 'running', $3, $4)
+		`, key, newRunID, now, nullString(cursor)); err != nil {
+			return err
+		}
+
+		result = SyncStartResult{
+			RunID:     newRunID,
+			StartedAt: now,
+		}
+		return nil
+	})
+	return result, err
+}
+
+func (r *Repository) FinishSync(ctx context.Context, key, runID string, success bool, errMsg string) error {
+	status := "success"
+	if !success {
+		status = "failed"
+	}
+	var errValue string
+	if !success {
+		errValue = errMsg
+	}
+	tag, err := r.exec(ctx, `
+		UPDATE sync_state
+		SET status = $1,
+			last_sync_at = now(),
+			last_success_at = CASE WHEN $2 THEN now() ELSE last_success_at END,
+			last_error = CASE WHEN $2 THEN NULL ELSE $3 END
+		WHERE key = $4
+		  AND current_run_id = $5
+	`, status, success, nullString(errValue), key, runID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return errors.New("sync state not found or run_id mismatch")
+	}
+	if _, err := r.exec(ctx, `
+		UPDATE sync_runs
+		SET status = $1,
+		    finished_at = now(),
+		    error = $2
+		WHERE run_id = $3
+	`, status, nullString(errValue), runID); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *Repository) ListRecentSyncStatus(ctx context.Context, key string, window time.Duration) ([]domain.SyncStatusItem, error) {
+	if window <= 0 {
+		window = time.Hour
+	}
+	const query = `
+		SELECT key, status, current_run_id, current_started_at,
+		       last_success_at, last_cursor, last_error, last_sync_at
+		FROM sync_state
+		WHERE key = $1
+		  AND (status = 'running' OR last_sync_at >= $2)
+		ORDER BY
+		  CASE WHEN status = 'running' THEN 0 ELSE 1 END,
+		  COALESCE(current_started_at, last_sync_at) DESC
+	`
+	cutoff := time.Now().UTC().Add(-window)
+	rows, err := r.query(ctx, query, key, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []domain.SyncStatusItem
+	for rows.Next() {
+		var item domain.SyncStatusItem
+		var runID *string
+		var lastCursor *string
+		var lastError *string
+		var lastSyncAt *time.Time
+		if err := rows.Scan(
+			&item.Key,
+			&item.Status,
+			&runID,
+			&item.CurrentStartedAt,
+			&item.LastSuccessAt,
+			&lastCursor,
+			&lastError,
+			&lastSyncAt,
+		); err != nil {
+			return nil, err
+		}
+		if runID != nil {
+			item.CurrentRunID = *runID
+		}
+		if lastCursor != nil {
+			item.LastCursor = *lastCursor
+		}
+		if lastError != nil {
+			item.LastError = *lastError
+		}
+		items = append(items, item)
+	}
+	if rows.Err() != nil {
+		return nil, rows.Err()
+	}
+	return items, nil
+}
+
+func (r *Repository) ListSyncRuns(ctx context.Context, key string, limit, offset int) ([]domain.SyncRun, error) {
+	limit, offset = normalizePaging(limit, offset)
+	const query = `
+		SELECT id, key, run_id, status, started_at, finished_at, last_cursor, error
+		FROM sync_runs
+		WHERE key = $1
+		ORDER BY started_at DESC
+		LIMIT $2 OFFSET $3
+	`
+	rows, err := r.query(ctx, query, key, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []domain.SyncRun
+	for rows.Next() {
+		var item domain.SyncRun
+		var finishedAt *time.Time
+		var lastCursor *string
+		var errValue *string
+		if err := rows.Scan(
+			&item.ID,
+			&item.Key,
+			&item.RunID,
+			&item.Status,
+			&item.StartedAt,
+			&finishedAt,
+			&lastCursor,
+			&errValue,
+		); err != nil {
+			return nil, err
+		}
+		item.FinishedAt = finishedAt
+		if lastCursor != nil {
+			item.LastCursor = *lastCursor
+		}
+		if errValue != nil {
+			item.Error = *errValue
+		}
+		items = append(items, item)
+	}
+	if rows.Err() != nil {
+		return nil, rows.Err()
+	}
+	return items, nil
 }
 
 func (r *Repository) execBatch(ctx context.Context, batch *pgx.Batch) error {
@@ -517,4 +731,11 @@ func nullBytes(value []byte) any {
 		return nil
 	}
 	return value
+}
+
+func derefTime(value *time.Time) time.Time {
+	if value == nil {
+		return time.Time{}
+	}
+	return *value
 }
