@@ -3,16 +3,21 @@ package httpdelivery
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
+	"github.com/go-chi/chi/v5"
 	"slotegrator-service/internal/auth"
 	"slotegrator-service/internal/config"
 	"slotegrator-service/internal/domain"
 	"slotegrator-service/internal/repository/postgres"
 	"slotegrator-service/internal/slotegratorapi"
+	catalogsync "slotegrator-service/internal/sync"
 	"slotegrator-service/internal/wallets"
 
 	"github.com/google/uuid"
@@ -23,6 +28,8 @@ type Handler struct {
 	wallets *wallets.Client
 	repo    *postgres.Repository
 	api     *slotegratorapi.Client
+	syncMu  sync.Mutex
+	syncing bool
 }
 
 func New(cfg config.Config, walletsClient *wallets.Client, repo *postgres.Repository, api *slotegratorapi.Client) *Handler {
@@ -35,12 +42,14 @@ func New(cfg config.Config, walletsClient *wallets.Client, repo *postgres.Reposi
 }
 
 func (h *Handler) Router() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/slotegrator/callback", h.callback)
-	mux.HandleFunc("/slotegrator/providers", h.listProviders)
-	mux.HandleFunc("/slotegrator/games", h.listGames)
-	mux.HandleFunc("/slotegrator/launch", h.launch)
-	return mux
+	r := chi.NewRouter()
+	r.Post("/slotegrator/callback", h.callback)
+	r.Get("/slotegrator/providers", h.listProviders)
+	r.Post("/slotegrator/providers/sync", h.syncProviders)
+	r.Get("/slotegrator/games", h.listGames)
+	r.Post("/slotegrator/games/sync", h.syncGames)
+	r.Post("/slotegrator/launch", h.launch)
+	return r
 }
 
 func (h *Handler) callback(w http.ResponseWriter, r *http.Request) {
@@ -315,6 +324,69 @@ func (h *Handler) listGames(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
+type gamesSyncRequest struct {
+	ProviderIDs []int `json:"provider_ids"`
+}
+
+func (h *Handler) syncProviders(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	if !h.startSync() {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "sync already in progress"})
+		return
+	}
+	defer h.finishSync()
+
+	syncer := catalogsync.NewCatalogSync(h.repo, h.api, 0)
+	result, err := syncer.SyncProviders(r.Context())
+	if err != nil {
+		log.Printf("providers sync error: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "sync failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"providers": result.Providers,
+		"synced_at": result.SyncedAt,
+	})
+}
+
+func (h *Handler) syncGames(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var req gamesSyncRequest
+	if err := decodeOptionalJSON(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return
+	}
+	providerIDs, err := normalizeProviderIDs(req.ProviderIDs)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid provider_ids"})
+		return
+	}
+	if !h.startSync() {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "sync already in progress"})
+		return
+	}
+	defer h.finishSync()
+
+	syncer := catalogsync.NewCatalogSync(h.repo, h.api, 0)
+	result, err := syncer.SyncGames(r.Context(), providerIDs)
+	if err != nil {
+		log.Printf("games sync error: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "sync failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"providers": result.Providers,
+		"games":     result.Games,
+		"synced_at": result.SyncedAt,
+	})
+}
+
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -363,6 +435,25 @@ func decodeJSON(r *http.Request, out any) error {
 	return nil
 }
 
+func decodeOptionalJSON(r *http.Request, out any) error {
+	if r.Body == nil {
+		return nil
+	}
+	defer r.Body.Close()
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(out); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		return err
+	}
+	if decoder.More() {
+		return errors.New("invalid json")
+	}
+	return nil
+}
+
 func parseInt(raw string) int {
 	if raw == "" {
 		return 0
@@ -372,6 +463,41 @@ func parseInt(raw string) int {
 		return 0
 	}
 	return val
+}
+
+func normalizeProviderIDs(ids []int) ([]int, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	unique := make(map[int]struct{}, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			return nil, errBadRequest
+		}
+		unique[id] = struct{}{}
+	}
+	normalized := make([]int, 0, len(unique))
+	for id := range unique {
+		normalized = append(normalized, id)
+	}
+	sort.Ints(normalized)
+	return normalized, nil
+}
+
+func (h *Handler) startSync() bool {
+	h.syncMu.Lock()
+	defer h.syncMu.Unlock()
+	if h.syncing {
+		return false
+	}
+	h.syncing = true
+	return true
+}
+
+func (h *Handler) finishSync() {
+	h.syncMu.Lock()
+	h.syncing = false
+	h.syncMu.Unlock()
 }
 
  

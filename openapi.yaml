@@ -5,6 +5,8 @@ info:
   description: |
     Slotegrator integration service for callback handling, game catalog,
     and game launch sessions.
+    Catalog data is stored locally and refreshed via POST /slotegrator/providers/sync
+    and POST /slotegrator/games/sync.
 servers:
   - url: http://localhost:8092
 
@@ -102,6 +104,23 @@ paths:
         '500':
           description: Server error
 
+  /slotegrator/providers/sync:
+    post:
+      summary: Trigger providers sync
+      description: |
+        Triggers a one-time providers sync from Slotegrator and updates the local store.
+      responses:
+        '200':
+          description: Sync completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProvidersSyncResponse'
+        '409':
+          description: Sync already in progress
+        '500':
+          description: Sync failed
+
   /slotegrator/games:
     get:
       summary: List games
@@ -143,6 +162,30 @@ paths:
                       $ref: '#/components/schemas/Game'
         '500':
           description: Server error
+
+  /slotegrator/games/sync:
+    post:
+      summary: Trigger games sync
+      description: |
+        Triggers a one-time games sync from Slotegrator and updates the local store.
+        Optional provider_ids filter limits which providers' games are saved.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GamesSyncRequest'
+      responses:
+        '200':
+          description: Sync completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GamesSyncResponse'
+        '409':
+          description: Sync already in progress
+        '500':
+          description: Sync failed
 
   /slotegrator/launch:
     post:
@@ -352,3 +395,29 @@ components:
           type: string
         url:
           type: string
+    GamesSyncRequest:
+      type: object
+      properties:
+        provider_ids:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+    ProvidersSyncResponse:
+      type: object
+      properties:
+        providers:
+          type: integer
+        synced_at:
+          type: string
+          format: date-time
+    GamesSyncResponse:
+      type: object
+      properties:
+        providers:
+          type: integer
+        games:
+          type: integer
+        synced_at:
+          type: string
+          format: date-time

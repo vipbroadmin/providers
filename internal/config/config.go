@@ -35,7 +35,7 @@ func Load() Config {
 		APIURL:               getEnv("SLOTEGRATOR_API_URL", ""),
 		DatabaseURL:          getEnv("DATABASE_URL", ""),
 		MigrationsDir:        getEnv("MIGRATIONS_DIR", "migrations"),
-		SyncInterval:         getDurationEnv("SLOTEGRATOR_SYNC_INTERVAL", 5*time.Minute),
+		SyncInterval:         getDurationEnv("SLOTEGRATOR_SYNC_INTERVAL", 0),
 	}
 }
 
