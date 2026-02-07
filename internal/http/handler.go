@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"slotegrator-service/internal/auth"
 	"slotegrator-service/internal/config"
 	"slotegrator-service/internal/domain"
@@ -20,6 +19,8 @@ import (
 	"slotegrator-service/internal/slotegratorapi"
 	catalogsync "slotegrator-service/internal/sync"
 	"slotegrator-service/internal/wallets"
+
+	"github.com/go-chi/chi/v5"
 
 	"github.com/google/uuid"
 )
@@ -47,6 +48,7 @@ func (h *Handler) Router() http.Handler {
 	r.Get("/slotegrator/providers/sync/status", h.providersSyncStatus)
 	r.Post("/slotegrator/providers/sync", h.syncProviders)
 	r.Get("/slotegrator/games", h.listGames)
+	r.Get("/slotegrator/games/{game_uuid}/lobby", h.gameLobby)
 	r.Get("/slotegrator/games/sync/status", h.gamesSyncStatus)
 	r.Post("/slotegrator/games/sync", h.syncGames)
 	r.Post("/slotegrator/launch", h.launch)
@@ -66,8 +68,8 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request) {
 
 	headers := map[string]string{
 		"X-Merchant-Id": r.Header.Get("X-Merchant-Id"),
-		"X-Timestamp":  r.Header.Get("X-Timestamp"),
-		"X-Nonce":      r.Header.Get("X-Nonce"),
+		"X-Timestamp":   r.Header.Get("X-Timestamp"),
+		"X-Nonce":       r.Header.Get("X-Nonce"),
 	}
 	xSign := r.Header.Get("X-Sign")
 
@@ -202,17 +204,17 @@ func parseGameRequest(r *http.Request) (wallets.GameRequest, error) {
 }
 
 type launchRequest struct {
-	GameUUID  string `json:"game_uuid"`
-	PlayerID  string `json:"player_id"`
+	GameUUID   string `json:"game_uuid"`
+	PlayerID   string `json:"player_id"`
 	PlayerName string `json:"player_name"`
-	Currency  string `json:"currency"`
-	SessionID string `json:"session_id,omitempty"`
-	Device    string `json:"device,omitempty"`
-	ReturnURL string `json:"return_url,omitempty"`
-	Language  string `json:"language,omitempty"`
-	Email     string `json:"email,omitempty"`
-	LobbyData string `json:"lobby_data,omitempty"`
-	Demo      bool   `json:"demo,omitempty"`
+	Currency   string `json:"currency"`
+	SessionID  string `json:"session_id,omitempty"`
+	Device     string `json:"device,omitempty"`
+	ReturnURL  string `json:"return_url,omitempty"`
+	Language   string `json:"language,omitempty"`
+	Email      string `json:"email,omitempty"`
+	LobbyData  string `json:"lobby_data,omitempty"`
+	Demo       bool   `json:"demo,omitempty"`
 }
 
 type launchResponse struct {
@@ -230,12 +232,18 @@ func (h *Handler) launch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
 		return
 	}
-	if req.GameUUID == "" || req.PlayerID == "" || req.PlayerName == "" || req.Currency == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing required fields"})
+	if req.GameUUID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "game_uuid required"})
 		return
 	}
-	req.Currency = strings.ToUpper(req.Currency)
-	if req.SessionID == "" {
+	if !req.Demo && (req.PlayerID == "" || req.PlayerName == "" || req.Currency == "") {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "player_id, player_name, currency required for non-demo launch"})
+		return
+	}
+	if req.Currency != "" {
+		req.Currency = strings.ToUpper(req.Currency)
+	}
+	if !req.Demo && req.SessionID == "" {
 		req.SessionID = uuid.NewString()
 	}
 
@@ -246,44 +254,71 @@ func (h *Handler) launch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	url, err := h.api.InitGame(r.Context(), slotegratorapi.InitGameRequest{
-		GameUUID:  req.GameUUID,
-		PlayerID:  req.PlayerID,
-		PlayerName: req.PlayerName,
-		Currency:  req.Currency,
-		SessionID: req.SessionID,
-		Device:    req.Device,
-		ReturnURL: req.ReturnURL,
-		Language:  req.Language,
-		Email:     req.Email,
-		LobbyData: req.LobbyData,
-		Demo:      req.Demo,
-	})
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "launch failed"})
-		return
-	}
-
-	providerID := &game.ProviderID
-
-	if err := h.repo.UpsertSession(r.Context(), domain.GameSession{
-		SessionID:  req.SessionID,
-		PlayerID:   req.PlayerID,
-		ProviderID: providerID,
 		GameUUID:   req.GameUUID,
+		PlayerID:   req.PlayerID,
+		PlayerName: req.PlayerName,
 		Currency:   req.Currency,
-		Status:     "active",
-		LaunchURL:  url,
+		SessionID:  req.SessionID,
 		Device:     req.Device,
 		ReturnURL:  req.ReturnURL,
 		Language:   req.Language,
-	}); err != nil {
-		log.Printf("session save error: %v", err)
+		Email:      req.Email,
+		LobbyData:  req.LobbyData,
+		Demo:       req.Demo,
+	})
+	if err != nil {
+		log.Printf("launch init error: %v", err)
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":   "launch failed",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	sessionID := req.SessionID
+	if !req.Demo {
+		providerID := &game.ProviderID
+		if err := h.repo.UpsertSession(r.Context(), domain.GameSession{
+			SessionID:  req.SessionID,
+			PlayerID:   req.PlayerID,
+			ProviderID: providerID,
+			GameUUID:   req.GameUUID,
+			Currency:   req.Currency,
+			Status:     "active",
+			LaunchURL:  url,
+			Device:     req.Device,
+			ReturnURL:  req.ReturnURL,
+			Language:   req.Language,
+		}); err != nil {
+			log.Printf("session save error: %v", err)
+		}
 	}
 
 	writeJSON(w, http.StatusOK, launchResponse{
-		SessionID: req.SessionID,
+		SessionID: sessionID,
 		URL:       url,
 	})
+}
+
+func (h *Handler) gameLobby(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	gameUUID := chi.URLParam(r, "game_uuid")
+	currency := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("currency")))
+	if gameUUID == "" || currency == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "game_uuid and currency required"})
+		return
+	}
+	technology := strings.TrimSpace(r.URL.Query().Get("technology"))
+	tables, err := h.api.GetLobby(r.Context(), gameUUID, currency, technology)
+	if err != nil {
+		log.Printf("get lobby error: %v", err)
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to load lobby"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": tables})
 }
 
 func (h *Handler) listProviders(w http.ResponseWriter, r *http.Request) {
@@ -607,5 +642,3 @@ func optionalTime(value time.Time) *time.Time {
 	}
 	return &value
 }
-
- 

@@ -187,6 +187,45 @@ paths:
         '500':
           description: Server error
 
+  /slotegrator/games/{game_uuid}/lobby:
+    get:
+      summary: Get lobby tables for a game
+      description: |
+        Returns lobby tables for games with has_lobby. Use lobbyData from the chosen
+        table in POST /slotegrator/launch as lobby_data.
+      parameters:
+        - in: path
+          name: game_uuid
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: currency
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: technology
+          schema:
+            type: string
+            enum: [html5, flash]
+      responses:
+        '200':
+          description: Lobby tables list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/LobbyTable'
+        '400':
+          description: Bad request or failed to load lobby
+        '500':
+          description: Server error
+
   /slotegrator/games/sync:
     post:
       summary: Trigger games sync
@@ -409,9 +448,10 @@ components:
       type: object
       required:
         - game_uuid
-        - player_id
-        - player_name
-        - currency
+      description: |
+        For non-demo launch, player_id, player_name, currency are required.
+        For demo (demo true), only game_uuid is required; player_id, player_name,
+        currency, session_id are optional and not sent to Slotegrator.
       properties:
         game_uuid:
           type: string
@@ -434,8 +474,35 @@ components:
           type: string
         lobby_data:
           type: string
+          description: From GET .../lobby items[].lobbyData for games with has_lobby
         demo:
           type: boolean
+    LobbyTable:
+      type: object
+      properties:
+        lobbyData:
+          type: string
+          description: Pass to POST /slotegrator/launch as lobby_data
+        name:
+          type: string
+        isOpen:
+          type: boolean
+        openTime:
+          type: string
+        closeTime:
+          type: string
+        dealerName:
+          type: string
+        dealerAvatar:
+          type: string
+        technology:
+          type: string
+        limits:
+          type: array
+          items:
+            type: object
+        tableId:
+          type: string
     LaunchResponse:
       type: object
       properties:

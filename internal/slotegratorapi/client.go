@@ -61,21 +61,73 @@ type gamesResponse struct {
 }
 
 type InitGameRequest struct {
-	GameUUID  string
-	PlayerID  string
+	GameUUID   string
+	PlayerID   string
 	PlayerName string
-	Currency  string
-	SessionID string
-	Device    string
-	ReturnURL string
-	Language  string
-	Email     string
-	LobbyData string
-	Demo      bool
+	Currency   string
+	SessionID  string
+	Device     string
+	ReturnURL  string
+	Language   string
+	Email      string
+	LobbyData  string
+	Demo       bool
 }
 
 type initGameResponse struct {
 	URL string `json:"url"`
+}
+
+// LobbyTable represents a single table entry from GET /games/lobby.
+type LobbyTable struct {
+	LobbyData    string          `json:"lobbyData"`
+	Name         string          `json:"name"`
+	IsOpen       bool            `json:"isOpen"`
+	OpenTime     string          `json:"openTime"`
+	CloseTime    string          `json:"closeTime"`
+	DealerName   string          `json:"dealerName"`
+	DealerAvatar string          `json:"dealerAvatar"`
+	Technology   string          `json:"technology"`
+	Limits       json.RawMessage `json:"limits"`
+	TableID      string          `json:"tableId"`
+}
+
+// GetLobby returns lobby tables for the given game (for games with has_lobby).
+// technology is optional: "html5" or "flash".
+func (c *Client) GetLobby(ctx context.Context, gameUUID, currency, technology string) ([]LobbyTable, error) {
+	if gameUUID == "" || currency == "" {
+		return nil, fmt.Errorf("game_uuid and currency required")
+	}
+	params := url.Values{}
+	params.Set("game_uuid", gameUUID)
+	params.Set("currency", currency)
+	if technology != "" {
+		params.Set("technology", technology)
+	}
+	resp, err := c.doRequest(ctx, http.MethodGet, "/games/lobby", params)
+	if err != nil {
+		return nil, err
+	}
+	body, err := readResponseBody(resp)
+	if err != nil {
+		return nil, err
+	}
+	var parsed struct {
+		Lobby json.RawMessage `json:"lobby"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, err
+	}
+	// API may return lobby as array or single object
+	var tables []LobbyTable
+	if err := json.Unmarshal(parsed.Lobby, &tables); err != nil {
+		var single LobbyTable
+		if singleErr := json.Unmarshal(parsed.Lobby, &single); singleErr != nil {
+			return nil, fmt.Errorf("lobby response: %w", err)
+		}
+		tables = []LobbyTable{single}
+	}
+	return tables, nil
 }
 
 func (c *Client) ListGames(ctx context.Context) ([]GameItem, error) {
@@ -113,15 +165,22 @@ func (c *Client) ListGames(ctx context.Context) ([]GameItem, error) {
 }
 
 func (c *Client) InitGame(ctx context.Context, req InitGameRequest) (string, error) {
-	if req.GameUUID == "" || req.PlayerID == "" || req.PlayerName == "" || req.Currency == "" || req.SessionID == "" {
-		return "", fmt.Errorf("missing required fields")
+	if req.GameUUID == "" {
+		return "", fmt.Errorf("game_uuid required")
+	}
+	if !req.Demo {
+		if req.PlayerID == "" || req.PlayerName == "" || req.Currency == "" || req.SessionID == "" {
+			return "", fmt.Errorf("player_id, player_name, currency, session_id required for non-demo")
+		}
 	}
 	params := url.Values{}
 	params.Set("game_uuid", req.GameUUID)
-	params.Set("player_id", req.PlayerID)
-	params.Set("player_name", req.PlayerName)
-	params.Set("currency", req.Currency)
-	params.Set("session_id", req.SessionID)
+	if !req.Demo {
+		params.Set("player_id", req.PlayerID)
+		params.Set("player_name", req.PlayerName)
+		params.Set("currency", req.Currency)
+		params.Set("session_id", req.SessionID)
+	}
 	if req.Device != "" {
 		params.Set("device", req.Device)
 	}
@@ -220,8 +279,8 @@ func (c *Client) doRequest(ctx context.Context, method, path string, params url.
 func (c *Client) signedHeaders(params url.Values) map[string]string {
 	headers := map[string]string{
 		"X-Merchant-Id": c.merchantID,
-		"X-Timestamp":  strconv.FormatInt(time.Now().Unix(), 10),
-		"X-Nonce":      uuid.NewString(),
+		"X-Timestamp":   strconv.FormatInt(time.Now().Unix(), 10),
+		"X-Nonce":       uuid.NewString(),
 	}
 	merged := map[string]string{}
 	for key, values := range params {
@@ -259,4 +318,3 @@ func readResponseBody(resp *http.Response) ([]byte, error) {
 	}
 	return body, nil
 }
-
